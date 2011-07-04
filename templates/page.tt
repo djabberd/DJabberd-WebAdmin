@@ -39,7 +39,7 @@
 
 <div id="bottom">
 <div id="poweredby">Powered by DJabberd Web Admin</div>
-<div id="versioninfo">using DJabberd version [[djabberd_version|html]] and Perlbal version [[perlbal_version|html]]</div>
+<div id="versioninfo">using DJabberd version [[djabberd_version|html]] and Twiggy version [[twiggy_version|html]]</div>
 </div>
 
 </div>

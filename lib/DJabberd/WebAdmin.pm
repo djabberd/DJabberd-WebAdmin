@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 #
 # DJabberd Web Admin interface
-# using Perlbal as its HTTP server
+# using Twiggy as its HTTP server
 #
 # This is really just a proof-of-concept at the moment, and doesn't do anything particularly useful
 #
@@ -15,8 +15,10 @@ package DJabberd::WebAdmin;
 require 5.008;
 
 use strict;
-use Perlbal; # FIXME: Once a release of Perlbal with the new API has actually been made, require that version explicitly here
-use Perlbal::Plugin::Cgilike;
+use Twiggy; # To get its version number
+use Twiggy::Server;
+use Plack::Request;
+use Plack::Response;
 use Symbol;
 use Template;
 
@@ -26,8 +28,15 @@ our $logger = DJabberd::Log->get_logger();
 
 my $server = undef;
 
+# FIXME: Make this configurable so that
+# this module can be installed sensibly.
+my $lib_path = __FILE__;
+$lib_path =~ s!/[^/]+$!!;
+my $static_path = $lib_path . "/../../stat";
+my $template_path = $lib_path . "/../../templates";
+
 my $tt = Template->new({
-    INCLUDE_PATH => 'templates',
+    INCLUDE_PATH => $template_path,
     
     START_TAG => quotemeta("[["),
     END_TAG => quotemeta("]]"),
@@ -35,6 +44,8 @@ my $tt = Template->new({
     POST_CHOMP => 2, # CHOMP_COLLAPSE
     RECURSION => 1,
 });
+
+sub error404(); # implemented below
 
 sub set_config_listenaddr {
     my ($self, $addr) = @_;
@@ -51,28 +62,24 @@ sub finalize {
 
     $logger->logdie("No ListenAddr specified for WebAdmin") unless $self->{listenaddr};
 
-    # We depend on the "cgilike" plugin
-    # FIXME: Should add a nice API to Perlbal for this
-    Perlbal::run_manage_command("LOAD cgilike", sub { $logger->info('[perlbal] '.$_[0]); });
-    
-    # Create an anonymous Perlbal service
-    my $pbsvc = Perlbal->create_service();
-    
-    $pbsvc->set('listen', $self->{listenaddr});
-    $pbsvc->set('role', 'web_server');
-    $pbsvc->set('plugins', 'cgilike');
-    
-    # It'd be good if there was a nicer API to do this, but whatever
-    $pbsvc->run_manage_command('PERLHANDLER = DJabberd::WebAdmin::handle_web_request');
-    
-    $pbsvc->enable();
-    
-    # Let Perlbal do any global initialization it needs to do.
-    Perlbal::initialize();
-    
-    # Hopefully by this point Perlbal's screwed around enough with Danga::Socket
-    # that it'll just work!
-    
+    my ($host, $port) = split(/:/, $self->{listenaddr}, 2);
+
+    $logger->info("Initializing web admin service");
+
+    my $twiggy = Twiggy::Server->new(
+        host => $host,
+        port => $port,
+    );
+    $twiggy->register_service(\&handle_web_request);
+
+    $self->{twiggy} = $twiggy;
+
+    # By now Twiggy should've bound its listen port and
+    # dropped the relevant AnyEvent watchers it needs
+    # so we can just return.
+
+    $logger->info("Web admin service is ready to accept requests");
+
     return 1;
 }
 
@@ -81,6 +88,7 @@ sub register {
     
     unless ($server) {
         $server = $vhost->server;
+        $logger->info("Web admin service will report on $server");
     }
     else {
         $logger->logdie("Can't load DJabberd::WebAdmin into more than one VHost");
@@ -89,92 +97,94 @@ sub register {
 }
 
 sub handle_web_request {
-    my ($r) = @_;
+    my ($env) = @_;
 
-    my $path = $r->path;
+    my $req = Plack::Request->new($env);
+
+    my $path = $req->path_info;
+
+    $logger->info("Incoming request for $path");
 
     # If the URL starts with /_/ then it's a static file request.
     if ($path =~ m!^/_/(\w+)$!) {
         my $resource_name = $1;
-        return handle_static_resource($r, $resource_name);
+        return handle_static_resource($req, $resource_name);
     }
-    # which we just let Perlbal handle itself.
-    return Perlbal::Plugin::Cgilike::DECLINED if ($path =~ m!^/_/!);
+    elsif ($path eq '/favicon.ico') {
+        return handle_static_resource($req, 'favicon');
+    }
 
     # All valid paths end with a slash
     # (because it makes it easier to construct relative links)
-    if (substr($path, -1) ne '/') {
-        $r->response_status_code(302);
-        $r->response_header('Location' => $path.'/');
-        print "...";
-        return Perlbal::Plugin::Cgilike::HANDLED;
+    if (0 && substr($path, -1) ne '/') {
+        $logger->debug("Redirecting $path to $path/");
+        return [
+            302,
+            [ 'Location' => $path . '/' ],
+            [ "..." ],
+        ];
     }
 
-    my $page = determine_page_for_request($r);
-    
+    my $page = determine_page_for_request($req);
+
+    unless (defined $page) {
+        $logger->debug("No page matched for $path");
+        return error404;
+    }
+
     unless (ref $page) {
         # It's a string containing a relative URL to redirect to
-        $r->response_status_code(302);
-        $r->response_header('Location' => $path.$page);
-        print "...";
-        return Perlbal::Plugin::Cgilike::HANDLED;
+        $logger->debug("Redirecting $path to $path$page");
+        return [
+            302,
+            [ 'Location' => $path . $page ],
+            [ "..." ],
+        ];
     }
     
     if ($page) {
-        output_page($r, $page);
-        return Perlbal::Plugin::Cgilike::HANDLED;
+        return output_page($req, $page);
     }
     else {
-        return 404;
+        return error404;
     }
-
-    return Perlbal::Plugin::Cgilike::HANDLED;
 }
 
 sub handle_static_resource {
-    my ($r, $name) = @_;
+    my ($req, $name) = @_;
     
     my $fn = undef;
     my $type = undef;
-    
+
     if ($name eq 'style') {
-        $fn = 'stat/style.css';
+        $fn = "$static_path/style.css";
         $type = 'text/css';
     }
     else {
-        $fn = 'stat/'.$name.'.png';
+        $fn = "$static_path/$name.png";
         $type = 'image/png';
     }
 
-    return 404 unless defined($fn) && -f $fn;
-    
-    $r->response_header('Content-type' => $type);
-    $r->send_response_header();
-    
-    # FIXME: Should really add an API to Cgilike's $r for this, which can then use sendfile
-    # This is lame.
-    
-    return 404 unless open (STATFILE, '<', $fn);
-    
-    # FIXME: Really should to binmode() the fh underlying $r, but no nice API for this right now
-    #    and DJabberd doesn't work on Windows anyway.
-    binmode STATFILE;
-    
-    my $buf = "";
-    while (read(STATFILE, $buf, 1024)) {
-        print $buf;
-    }
-    
-    close(STATFILE);
-    
-    return Perlbal::Plugin::Cgilike::HANDLED;
+    $logger->info("Serving static file $fn as $type");
+
+    return error404 unless defined($fn) && -f $fn;
+
+    return [
+        200,
+        [ 'Content-Type' => $type ],
+        IO::File->new($fn, 'r'),
+    ];
 }
 
 sub determine_page_for_request {
-    my ($r) = @_;
-    
-    my @pathbits = $r->path_segments;
-    pop @pathbits; # Zzap mpty string on the end because of our trailing slash
+    my ($req) = @_;
+
+    my $path = $req->path_info;
+
+    my @pathbits = split(m!/!, $path);
+    shift @pathbits; # zzap empty string on the front because of the leading slash
+
+    warn Data::Dumper::Dumper(\@pathbits);
     
     if (scalar(@pathbits) == 0) {
         return DJabberd::WebAdmin::Page::Home->new();
@@ -209,11 +219,13 @@ sub dump_object_html {
 *ehtml = \&DJabberd::Util::exml;
 
 sub output_page {
-    my ($r, $page) = @_;
+    my ($req, $page) = @_;
 
     my $title = $page->title;
 
-    my @pathbits = $r->path_segments;
+    my $path = $req->path_info;
+    my @pathbits = split(m!/!, $path);
+    shift @pathbits;
 
     my @tabs = (
         {
@@ -230,6 +242,7 @@ sub output_page {
         },
     );
 
+    my $result = '';
     $tt->process('page.tt', {
         section_title => $title ? $title : "DJabberd Web Admin",
         page_title => 'Summary',
@@ -259,9 +272,14 @@ sub output_page {
             return [ sort { $a->{name} cmp $b->{name} } @ret ];
         },
         djabberd_version => $DJabberd::VERSION,
-        perlbal_version => $Perlbal::VERSION,
-    }, $r);
+        twiggy_version => $Twiggy::VERSION,
+    }, \$result);
 
+    return [
+        200,
+        [ 'Content-Type' => 'text/html' ],
+        [ $result ],
+    ];
 }
 
 sub capture_output {
@@ -279,6 +297,14 @@ sub capture_output {
     close($fh);
     
     return \$ret;
+}
+
+sub error404() {
+    return [
+        '404',
+        [ 'Content-Type' => 'text/plain' ],
+        [ "Not Found" ],
+    ];
 }
 
 package DJabberd::WebAdmin::Page;
