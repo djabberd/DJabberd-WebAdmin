@@ -24,6 +24,8 @@ use base qw(DJabberd::Plugin);
 
 our $logger = DJabberd::Log->get_logger();
 
+our $VERSION = '0.85';
+
 my $server = undef;
 
 my $tt = Template->new({
@@ -370,3 +372,9 @@ sub print_body {
 }
 
 1;
+
+__END__
+
+=head1 NAME
+
+DJabberd::WebAdmin - A proof-of-concept webinterface for DJabberd.
