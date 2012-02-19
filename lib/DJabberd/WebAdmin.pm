@@ -29,7 +29,7 @@ our $VERSION = '0.85';
 my $server = undef;
 
 my $tt = Template->new({
-    INCLUDE_PATH => 'templates',
+    INCLUDE_PATH => ['templates', '/var/lib/djabberd/webadmin/templates'],
     
     START_TAG => quotemeta("[["),
     END_TAG => quotemeta("]]"),
