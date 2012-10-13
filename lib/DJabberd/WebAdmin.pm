@@ -24,10 +24,12 @@ use base qw(DJabberd::Plugin);
 
 our $logger = DJabberd::Log->get_logger();
 
+our $VERSION = '0.85';
+
 my $server = undef;
 
 my $tt = Template->new({
-    INCLUDE_PATH => 'templates',
+    INCLUDE_PATH => ['templates', '/var/lib/djabberd/webadmin/templates'],
     
     START_TAG => quotemeta("[["),
     END_TAG => quotemeta("]]"),
@@ -46,6 +48,14 @@ sub set_config_listenaddr {
     $self->{listenaddr} = "127.0.0.1:".$self->{listenaddr} if $self->{listenaddr} =~ /^\d+$/;
 }
 
+sub set_config_docroot {
+    my ($self, $dir) = @_;
+    
+    if($dir && -d $dir) {
+        $self->{docroot} = $dir;
+    }
+}
+
 sub finalize {
     my ($self) = @_;
 
@@ -61,6 +71,7 @@ sub finalize {
     $pbsvc->set('listen', $self->{listenaddr});
     $pbsvc->set('role', 'web_server');
     $pbsvc->set('plugins', 'cgilike');
+    $pbsvc->set('docroot', $self->{docroot}) if $self->{docroot};
     
     # It'd be good if there was a nicer API to do this, but whatever
     $pbsvc->run_manage_command('PERLHANDLER = DJabberd::WebAdmin::handle_web_request');
@@ -145,6 +156,7 @@ sub handle_static_resource {
         $fn = 'stat/'.$name.'.png';
         $type = 'image/png';
     }
+    $fn = $r->{docroot}.'/'.$fn if $r->{docroot};
 
     return 404 unless defined($fn) && -f $fn;
     
@@ -197,6 +209,7 @@ sub determine_page_for_request {
             return DJabberd::WebAdmin::Page::VHostSummary->new($vhost);
         }
     }
+    # TODO add handlnig for client and server sessions here ...
     
     return undef;
 }
@@ -370,3 +383,9 @@ sub print_body {
 }
 
 1;
+
+__END__
+
+=head1 NAME
+
+DJabberd::WebAdmin - A proof-of-concept webinterface for DJabberd.

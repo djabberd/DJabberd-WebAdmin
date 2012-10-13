@@ -1,0 +1,6 @@
+tmp/
+libdjabberd-webadmin-perl/
+*.debhelper
+*.debhelper.log
+*.substvars
+files
